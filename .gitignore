@@ -1,0 +1,24 @@
+node_modules/
+
+.wwebjs_auth/
+.wwebjs_cache/
+.test.js/
+
+.env
+
+# Реальные настройки (SMTP-пароль и т.д.) и рантайм-данные — никогда не
+# должны попадать в публичный репозиторий. На проде эти файлы создаются
+# автоматически (readJson с фолбэком) или разворачиваются отдельно.
+settings.json
+users.json
+tickets.json
+conversations.json
+excluded-users.json
+company-groups.json
+
+.idea/
+
+*.log
+
+# Посторонний файл с тестовыми/чужими данными, не используется server.js
+_check.js
