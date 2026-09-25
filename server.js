@@ -798,6 +798,13 @@ async function sendTicketEmail(ticket, fromEmail) {
 
     const mailFrom = fromEmail || settings.fallbackFromEmail || process.env.SMTP_FROM || process.env.SMTP_USER || "support@example.com";
 
+    // Показывает в письме, ушло ли оно реально от имени почты клиента (её
+    // видно и в osTicket как "Создано") или пришлось откатиться на общий
+    // ящик WPPService — см. sendTicketEmailWithFallback.
+    const sentAsUser = Boolean(
+        ticket.email && mailFrom.trim().toLowerCase() === String(ticket.email).trim().toLowerCase()
+    );
+
     const info = await transporter.sendMail({
         from: mailFrom,
         replyTo: ticket.email || mailFrom,
@@ -816,7 +823,7 @@ async function sendTicketEmail(ticket, fromEmail) {
             <p><b>Телефон:</b> ${escapeHtml(ticket.phoneNumber)}</p>
             <p><b>AnyDesk:</b> ${escapeHtml(ticket.anyDesk || "")}</p>
             <p><b>Дата:</b> ${escapeHtml(formatDate(ticket.createdAt))}</p>
-            <p><b>Режим:</b> ${ticket.emailValidated ? "wppservice" : "ticketBot"}</p>
+            <p><b>Режим:</b> ${sentAsUser ? "wppservice" : "ticketBot"}</p>
         `
     });
 
@@ -831,9 +838,19 @@ async function sendTicketEmail(ticket, fromEmail) {
 async function sendTicketEmailWithFallback(ticket) {
     const fallbackEmail = settings.fallbackFromEmail || process.env.SMTP_FROM || process.env.SMTP_USER || "support@example.com";
 
-    // Если почта пользователя не прошла MX-проверку — сразу шлём от имени
-    // бота, даже не пытаясь использовать адрес пользователя как отправителя.
-    const validUserEmail = ticket.emailValidated && ticket.email && isValidEmail(ticket.email)
+    // Заявка всегда должна выглядеть как пришедшая от самого пользователя
+    // (в osTicket поле "Создано" берётся из From) — иначе непонятно, кто
+    // реально писал, хотя email введён в анкете. Раньше здесь ещё
+    // требовалось, чтобы домен почты был в trustedEmailDomains — но этот
+    // список содержит только свои внутренние домены (almaly.kz, aatd.kz),
+    // из-за чего реальная рабочая почта клиента из другой компании
+    // (например, kazdc.kz) отбраковывалась, и письмо всегда уходило от
+    // WPPService. Единственное, что действительно нужно проверить здесь —
+    // что адрес синтаксически корректен (isValidEmail), иначе почтовый
+    // сервер его просто не примет как From. Если отправка от имени клиента
+    // всё же не пройдёт (сервер отклонит "чужой" домен) — ниже есть
+    // автоматический повторный запрос от fallbackEmail.
+    const validUserEmail = ticket.email && isValidEmail(ticket.email)
         ? ticket.email
         : null;
 
