@@ -106,13 +106,16 @@ const DEFAULT_SETTINGS = {
         || "Данное обращение отработано через WhatsApp BOT. Можно закрыть заявку.",
 
     // Через сколько часов бездействия (ни пользователь, ни оператор ничего
-    // не писали) диалог в режиме "Чат со специалистом" автоматически
-    // закрывается — см. closeStaleSpecialistChats. Без этого пользователь,
-    // однажды попавший в этот режим, мог остаться в нём навсегда: следующее
-    // обращение просто повторно уходило в handleSpecialistMode вместо того,
-    // чтобы начать новую заявку. 0 или пустая строка — отключает автозакрытие.
+    // не писали) любой "зависший" диалог — не только чат со специалистом, а
+    // вообще любой шаг: анкета, меню категорий и т.д. — сбрасывается сам
+    // собой, см. closeStaleConversations. Без этого пользователь, однажды
+    // остановившийся на каком-то шаге, мог годами оставаться на нём: любое
+    // случайное сообщение через день/неделю подхватывалось как ответ на
+    // старое, забытое меню (например "1"/"2" неожиданно создавали заявку по
+    // категории, выбранной ещё в прошлый раз). Сброс происходит молча, без
+    // уведомления пользователя. 0 или пустая строка — отключает автосброс.
     // Редактируется в /admin/settings.
-    specialistChatTimeoutHours: Number(process.env.SPECIALIST_CHAT_TIMEOUT_HOURS || 24),
+    conversationStaleTimeoutHours: Number(process.env.CONVERSATION_STALE_TIMEOUT_HOURS || 6),
 
     // Сколько минут после закрытия заявки бот "молчит" в ответ на обычные
     // сообщения этого номера (например "спасибо", "ок") — чтобы такой ответ
@@ -464,15 +467,6 @@ function createSpecialistState(savedUser = {}) {
     };
 }
 
-// Обновляет метку времени последней активности в чате со специалистом —
-// используется фоновой задачей closeStaleSpecialistChats, чтобы понять,
-// что диалог "завис" и его пора автоматически закрыть (см. ниже). Вызывается
-// каждый раз, когда диалог переходит в шаг "specialistChat" и каждый раз,
-// когда пользователь пишет что-то, находясь в этом шаге.
-function touchSpecialistChatActivity(userState) {
-    userState.specialistChatLastActivityAt = new Date().toISOString();
-}
-
 // Поля анкеты, обязательные для "полной" регистрации. Позволяет отличить
 // полностью заполненного пользователя (можно сразу переходить к "Опишите
 // проблему") от черновика анкеты, прерванного досрочным переходом в чат со
@@ -635,7 +629,7 @@ async function finalizeTicketCreation(phone, userState, category) {
         }
     } catch (error) {
         userState.step = "mailFailMenu";
-        conversations.set(phone, userState);
+        setConversationState(phone, userState);
         saveConversations();
 
         await sendBotMessage(
@@ -668,7 +662,7 @@ ${error.message}`
     // заявки — так что дальнейший ответ пользователя не запустит новый
     // цикл сам по себе, а покажет явный выбор действия.
     userState.step = "cancelMenu";
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     await sendBotMessage(
@@ -752,6 +746,18 @@ function saveUsers() {
 }
 function saveConversations() {
     writeJson(CONVERSATIONS_FILE, Object.fromEntries(conversations));
+}
+
+// Единая точка сохранения состояния диалога — проставляет lastActivityAt
+// на каждое изменение (от пользователя, от оператора, от фоновых задач),
+// чтобы closeStaleConversations (см. ниже) могло понять, что диалог давно
+// не трогали, вне зависимости от того, на каком шаге он застрял (анкета,
+// меню категорий, чат со специалистом — не только он один, как было раньше).
+function setConversationState(phone, state) {
+    if (state && typeof state === "object") {
+        state.lastActivityAt = new Date().toISOString();
+    }
+    conversations.set(phone, state);
 }
 function saveTickets() {
     writeJson(TICKETS_FILE, tickets);
@@ -991,7 +997,7 @@ async function resetConversationToStart(phone, savedUser = null) {
 
     if (savedUser && isRegistrationComplete(phone)) {
         const state = createProblemState(savedUser);
-        conversations.set(phone, state);
+        setConversationState(phone, state);
         saveConversations();
 
         await sendBotMessage(
@@ -1012,7 +1018,7 @@ async function resetConversationToStart(phone, savedUser = null) {
         return;
     }
 
-    conversations.set(phone, createEmptyState());
+    setConversationState(phone, createEmptyState());
     saveConversations();
 
     await sendBotMessage(phone, settings.texts.startNewUser);
@@ -1043,7 +1049,7 @@ async function resumeIncompleteRegistration(phone) {
         data: { ...draft }
     };
 
-    conversations.set(phone, state);
+    setConversationState(phone, state);
     saveConversations();
 
     const prompt = missing ? missing[1] : settings.texts.askProblem;
@@ -1069,8 +1075,7 @@ async function escapeRegistrationToSpecialist(phone, userState, introText) {
 
     userState.step = "specialistChat";
     userState.mode = "specialist";
-    touchSpecialistChatActivity(userState);
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     await sendBotMessage(phone, introText || settings.texts.specialistIntro);
@@ -1106,7 +1111,7 @@ async function sendMyTicketsList(phone, userState) {
 
     userState.data.myTicketsIds = userTickets.map(t => t.id);
     userState.step = "myTicketsList";
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     const lines = userTickets.map((t, index) => {
@@ -1227,7 +1232,7 @@ async function sendBotMessage(phone, text) {
 // сценарий/новую заявку.
 function setAwaitingOperatorChoice(phone, ticketId = null) {
     const prevState = conversations.get(phone);
-    conversations.set(phone, {
+    setConversationState(phone, {
         step: "awaitingOperatorChoice",
         mode: "ticket",
         data: prevState?.data || {},
@@ -1367,10 +1372,9 @@ async function notifyUserAboutTicket(ticket, comment) {
 }
 
 async function handleSpecialistMode(phone, userState, text) {
-    // Каждое сообщение пользователя в этом режиме продлевает "жизнь" чата
-    // со специалистом — иначе фоновая задача closeStaleSpecialistChats
-    // закрыла бы активный диалог только потому, что он был начат давно.
-    touchSpecialistChatActivity(userState);
+    // lastActivityAt (и, значит, защиту от closeStaleConversations)
+    // проставляет setConversationState в конце этой функции — на каждое
+    // сообщение пользователя, продлевая "жизнь" чата со специалистом.
 
     const fields = [
     { name: "fullNameRu", label: "ФИО на русском" },
@@ -1446,7 +1450,7 @@ async function handleSpecialistMode(phone, userState, text) {
 
     userState.step = "editUserData";
     userState.data = { ...userData };
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
     return;
 }
@@ -1460,7 +1464,7 @@ if (userState.step === "editUserData") {
     if (field) {
         await sendBotMessage(phone, `Введите новое значение для поля "${field.label}":`);
         userState.step = `editUserData:${field.name}`;
-        conversations.set(phone, userState);
+        setConversationState(phone, userState);
         saveConversations();
     } else {
         await sendBotMessage(phone, "Некорректное название поля. Попробуйте еще раз.");
@@ -1483,7 +1487,7 @@ if (editFieldMatch) {
     );
 
     userState.step = "editUserData";
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
     return;
 }
@@ -1502,13 +1506,12 @@ if (userState.step === "editUserData" && text.trim().toLowerCase() === "гото
 
     await sendBotMessage(phone, "Данные успешно обновлены.");
     userState.step = "specialistChat";
-    touchSpecialistChatActivity(userState);
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
     return;
 }
 
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     // никаких ответов каждый раз не отправляем
@@ -1648,8 +1651,7 @@ function createWhatsAppClient() {
         // таймаут неактивности, а не сбрасываем диалог.
         const existingState = conversations.get(phone);
         if (existingState && existingState.step === "specialistChat") {
-            touchSpecialistChatActivity(existingState);
-            conversations.set(phone, existingState);
+            setConversationState(phone, existingState);
             saveConversations();
             return;
         }
@@ -1728,7 +1730,7 @@ if (
 ) {
     if (!userState) {
         userState = createEmptyState();
-        conversations.set(phone, userState);
+        setConversationState(phone, userState);
         saveConversations();
     }
 
@@ -1765,7 +1767,7 @@ if (!userState) {
 
             if (savedUser && isRegistrationComplete(phone)) {
                 userState = createProblemState(savedUser);
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
 
                 await sendBotMessage(
@@ -1782,7 +1784,7 @@ if (!userState) {
                 return;
             }
 
-            conversations.set(phone, createEmptyState(text));
+            setConversationState(phone, createEmptyState(text));
             saveConversations();
             await sendBotMessage(phone, settings.texts.startNewUser);
             return;
@@ -1795,7 +1797,7 @@ if (!userState) {
         case "1":
             userState.step = "problem";
 
-            conversations.set(phone, userState);
+            setConversationState(phone, userState);
             saveConversations();
 
             await sendBotMessage(
@@ -1824,14 +1826,14 @@ await sendBotMessage(
 );
 userState.step = "selectEditField";
 
-conversations.set(phone, userState);
+setConversationState(phone, userState);
 saveConversations();
 
 return;
 
 userState.step = "selectEditField";
 
-conversations.set(phone, userState);
+setConversationState(phone, userState);
 saveConversations();
 
 return;
@@ -1840,9 +1842,8 @@ return;
 
             userState.step = "specialistChat";
             userState.mode = "specialist";
-            touchSpecialistChatActivity(userState);
 
-            conversations.set(phone, userState);
+            setConversationState(phone, userState);
             saveConversations();
 
             await sendBotMessage(
@@ -1912,7 +1913,7 @@ return;
 
             if (choice === "0") {
                 userState.step = "category";
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
                 // Возврат из подменю к списку категорий — пользователя уже
                 // приветствовали при первом входе в этот список, повторное
@@ -1962,7 +1963,7 @@ return;
     if (text === "0") {
         userState.step = "cancelMenu";
 
-        conversations.set(phone, userState);
+        setConversationState(phone, userState);
         saveConversations();
 
         await sendBotMessage(
@@ -1990,7 +1991,7 @@ return;
     userState.editField = fields[text];
     userState.step = "editFieldValue";
 
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     await sendBotMessage(
@@ -2006,7 +2007,7 @@ if (userState.step === "editFieldValue") {
 
     if (!field) {
         userState.step = "cancelMenu";
-        conversations.set(phone, userState);
+        setConversationState(phone, userState);
         saveConversations();
         return;
     }
@@ -2026,7 +2027,7 @@ console.log(
     `[USER] ${phone} изменил поле "${field}" сам через чат бота (${new Date().toISOString()}): ` +
     `"${previousValue ?? ""}" -> "${users[phone][field]}"`
 );
-conversations.set(phone, userState);
+setConversationState(phone, userState);
 saveConversations();
 
 delete userState.editField;
@@ -2037,7 +2038,7 @@ if (userState.stepBeforeEdit === "mailFailMenu") {
 
     userState.step = "mailFailMenu";
 
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     await sendBotMessage(
@@ -2056,7 +2057,7 @@ if (userState.stepBeforeEdit === "mailFailMenu") {
 
 userState.step = "cancelMenu";
 
-conversations.set(phone, userState);
+setConversationState(phone, userState);
 saveConversations();
 
 await sendBotMessage(
@@ -2094,7 +2095,7 @@ if (userState.step === "mailFailMenu") {
     userState.stepBeforeEdit = "mailFailMenu";
     userState.step = "selectEditField";
 
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     return;
@@ -2104,7 +2105,7 @@ if (userState.step === "mailFailMenu") {
     userState.stepBeforeEdit = "mailFailMenu";
     userState.step = "selectEditField";
 
-            conversations.set(phone, userState);
+            setConversationState(phone, userState);
             saveConversations();
 
             await sendBotMessage(
@@ -2160,7 +2161,7 @@ if (userState.step === "editAfterMailFail") {
     );
 
     userState.step = "selectEditField";
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     return;
@@ -2191,7 +2192,7 @@ if (userState.step === "myTicketsList") {
 
     userState.data.selectedTicketId = ticket.id;
     userState.step = "myTicketsDetail";
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     await sendTicketDetail(phone, ticket);
@@ -2203,7 +2204,7 @@ if (userState.step === "myTicketsDetail") {
 
     if (rawChoice === "0") {
         userState.step = "cancelMenu";
-        conversations.set(phone, userState);
+        setConversationState(phone, userState);
         saveConversations();
 
         await sendBotMessage(
@@ -2229,7 +2230,7 @@ if (userState.step === "myTicketsDetail") {
 
         if (ticket) {
             userState.data.selectedTicketId = ticket.id;
-            conversations.set(phone, userState);
+            setConversationState(phone, userState);
             saveConversations();
 
             await sendTicketDetail(phone, ticket);
@@ -2260,7 +2261,7 @@ if (
             case "fullNameRu":
                 userState.data.fullNameRu = text;
                 userState.step = "fullNameEn";
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
                 await sendBotMessage(phone, settings.texts.askFullNameEn);
                 break;
@@ -2268,7 +2269,7 @@ if (
             case "fullNameEn":
                 userState.data.fullNameEn = text;
                 userState.step = "position";
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
                 await sendBotMessage(phone, settings.texts.askPosition);
                 break;
@@ -2276,7 +2277,7 @@ if (
             case "position":
                 userState.data.position = text;
                 userState.step = "company";
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
                 await sendBotMessage(phone, settings.texts.askCompany);
                 break;
@@ -2284,7 +2285,7 @@ if (
             case "company":
                 userState.data.company = text;
                 userState.step = "email";
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
                 await sendBotMessage(phone, settings.texts.askEmail);
                 break;
@@ -2306,7 +2307,7 @@ if (
                         return;
                     }
 
-                    conversations.set(phone, userState);
+                    setConversationState(phone, userState);
                     saveConversations();
                     await sendBotMessage(phone, settings.texts.invalidEmail);
                     return;
@@ -2316,7 +2317,7 @@ if (
                 userState.invalidAttempts = 0;
 
                 userState.step = "phone";
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
                 await sendBotMessage(phone, settings.texts.askPhone);
                 break;
@@ -2335,7 +2336,7 @@ if (
                         return;
                     }
 
-                    conversations.set(phone, userState);
+                    setConversationState(phone, userState);
                     saveConversations();
                     await sendBotMessage(phone, settings.texts.invalidPhone);
                     return;
@@ -2344,7 +2345,7 @@ if (
                 userState.data.phone = normalizePhone(text);
                 userState.invalidAttempts = 0;
                 userState.step = "problem";
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
                 await sendBotMessage(phone, settings.texts.askProblem);
                 break;
@@ -2373,7 +2374,7 @@ if (
                 assignCompanyGroup(users[phone]);
                 saveUsers();
 
-                conversations.set(phone, userState);
+                setConversationState(phone, userState);
                 saveConversations();
                 // Для только что зарегистрированного пользователя это первое
                 // приветствие (registeredProblemIntro тут не отправлялся);
@@ -2393,7 +2394,7 @@ if (
 
     userState.step = "cancelMenu";
 
-    conversations.set(phone, userState);
+    setConversationState(phone, userState);
     saveConversations();
 
     await sendBotMessage(
@@ -2434,8 +2435,7 @@ saveUsers();
 
                     userState.step = "specialistChat";
                     userState.mode = "specialist";
-                    touchSpecialistChatActivity(userState);
-                    conversations.set(phone, userState);
+                    setConversationState(phone, userState);
                     saveConversations();
 
                     await sendBotMessage(phone, settings.texts.specialistIntro);
@@ -2449,7 +2449,7 @@ saveUsers();
 
                 if (rawChoice === "1") {
                     userState.step = "category1Sub";
-                    conversations.set(phone, userState);
+                    setConversationState(phone, userState);
                     saveConversations();
                     await sendBotMessage(phone, settings.texts.category1SubIntro);
                     return;
@@ -2479,36 +2479,36 @@ client.initialize();
 // Фоновые задачи
 // --------------------------------------------------
 
-// Закрывает диалоги, застрявшие в режиме "Чат со специалистом" дольше
-// settings.specialistChatTimeoutHours без единого сообщения — ни от
-// пользователя, ни от оператора (см. touchSpecialistChatActivity). Диалог
-// просто удаляется, поэтому следующее сообщение пользователя обрабатывается
-// как обычное обращение: полностью зарегистрированный пользователь увидит
-// "Сначала опишите проблему" (т.е. попадёт в оформление новой заявки), а
-// пользователь с недозаполненной анкетой — донаберёт её (см.
-// resumeIncompleteRegistration). Пользователю дополнительно отправляется
-// сообщение о том, что чат закрыт по неактивности, чтобы это не выглядело
-// как "бот перестал отвечать".
-async function closeStaleSpecialistChats() {
-    const timeoutHours = Number(settings.specialistChatTimeoutHours) || 0;
+// Сбрасывает ЛЮБОЙ диалог (не только "Чат со специалистом" — анкету, меню
+// категорий, awaitingOperatorChoice и т.д.), если по нему дольше
+// settings.conversationStaleTimeoutHours не было ни одного сообщения — ни
+// от пользователя, ни от оператора (lastActivityAt проставляет
+// setConversationState на каждое изменение состояния). Диалог просто
+// удаляется, поэтому следующее сообщение пользователя обрабатывается как
+// обычное обращение "с чистого листа": полностью зарегистрированный
+// пользователь увидит "Сначала опишите проблему", пользователь с
+// недозаполненной анкетой — донаберёт её (см. resumeIncompleteRegistration).
+// Никакого уведомления не отправляется — сброс происходит молча, чтобы не
+// присылать пользователю сообщение "в никуда" спустя часы или дни тишины.
+async function closeStaleConversations() {
+    const timeoutHours = Number(settings.conversationStaleTimeoutHours) || 0;
     if (!timeoutHours) return;
 
     const cutoff = Date.now() - timeoutHours * 60 * 60 * 1000;
 
     for (const [phone, state] of Array.from(conversations.entries())) {
-        if (state?.step !== "specialistChat") continue;
+        if (!state) continue;
 
-        const lastActivity = state.specialistChatLastActivityAt
-            ? new Date(state.specialistChatLastActivityAt).getTime()
+        const lastActivity = state.lastActivityAt
+            ? new Date(state.lastActivityAt).getTime()
             : 0;
 
         // Если метки времени по какой-то причине нет (например, диалог был
-        // создан до появления этой функции) — не закрываем сразу же, а
+        // создан до появления этого механизма) — не закрываем сразу же, а
         // считаем точкой отсчёта именно этот момент, чтобы дать шанс
         // нормально продолжить разговор.
         if (!lastActivity) {
-            state.specialistChatLastActivityAt = new Date().toISOString();
-            conversations.set(phone, state);
+            setConversationState(phone, state);
             saveConversations();
             continue;
         }
@@ -2518,24 +2518,13 @@ async function closeStaleSpecialistChats() {
         conversations.delete(phone);
         saveConversations();
 
-        console.log(`Чат со специалистом автоматически закрыт по неактивности (${timeoutHours} ч.): ${phone}`);
-
-        if (isReady && client) {
-            try {
-                await sendBotMessage(
-                    phone,
-                    "⏳ Чат со специалистом автоматически закрыт из-за отсутствия активности.\n\nЧтобы создать новую заявку, напишите любое сообщение."
-                );
-            } catch (error) {
-                console.error("Ошибка уведомления об автозакрытии чата со специалистом:", error.message);
-            }
-        }
+        console.log(`Диалог (шаг "${state.step}") автоматически сброшен по неактивности (${timeoutHours} ч.): ${phone}`);
     }
 }
 
 setInterval(() => {
-    closeStaleSpecialistChats().catch(error => {
-        console.error("Ошибка автозакрытия чатов со специалистом:", error.message);
+    closeStaleConversations().catch(error => {
+        console.error("Ошибка автосброса зависших диалогов:", error.message);
     });
 }, 30 * 60 * 1000);
 
@@ -3923,13 +3912,14 @@ function renderSettingsPage() {
                             </p>
                         </div>
                         <div class="field">
-                            <label>Автозакрытие чата со специалистом (часов бездействия)</label>
-                            <input name="specialistChatTimeoutHours" value="${escapeHtml(settings.specialistChatTimeoutHours ?? "")}" placeholder="24" />
+                            <label>Автосброс зависшего диалога (часов бездействия)</label>
+                            <input name="conversationStaleTimeoutHours" value="${escapeHtml(settings.conversationStaleTimeoutHours ?? "")}" placeholder="6" />
                             <p class="help" style="margin-top:6px;">
-                                Если ни пользователь, ни оператор не написали ничего дольше этого времени,
-                                чат со специалистом закрывается автоматически, и следующее сообщение
-                                пользователя начнёт новую заявку. Проверяется каждые 30 минут.
-                                0 или пусто — автозакрытие выключено.
+                                Если ни пользователь, ни оператор не написали ничего дольше этого времени —
+                                на ЛЮБОМ шаге (анкета, меню категорий, чат со специалистом и т.д.) —
+                                диалог сбрасывается автоматически, молча, без сообщения пользователю.
+                                Следующее его сообщение начнётся "с чистого листа". Проверяется каждые
+                                30 минут. 0 или пусто — автосброс выключен.
                             </p>
                         </div>
                         <div class="field">
@@ -4498,9 +4488,9 @@ app.post("/admin/settings", (req, res) => {
             settings.closeTicketNotificationEmailText = String(req.body.closeTicketNotificationEmailText || "").trim();
         }
 
-        if (typeof req.body.specialistChatTimeoutHours !== "undefined") {
-            const parsed = Number(String(req.body.specialistChatTimeoutHours || "").trim());
-            settings.specialistChatTimeoutHours = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+        if (typeof req.body.conversationStaleTimeoutHours !== "undefined") {
+            const parsed = Number(String(req.body.conversationStaleTimeoutHours || "").trim());
+            settings.conversationStaleTimeoutHours = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
         }
 
         if (typeof req.body.ticketClosedSilenceMinutes !== "undefined") {
