@@ -3207,7 +3207,10 @@ function renderTicketsPage() {
                         <option value="specialist_chat" ${ticket.status === "specialist_chat" ? "selected" : ""}>specialist_chat</option>
                     </select>
                     <textarea name="comment" rows="2" placeholder="Комментарий пользователю (уйдёт в WhatsApp)..."></textarea>
-                    <button class="btn btn-primary" type="submit">Сохранить и уведомить</button>
+                    <div style="display:flex; gap:6px;">
+                        <button class="btn" type="submit" name="notify" value="0" style="flex:1;">Сохранить</button>
+                        <button class="btn btn-primary" type="submit" name="notify" value="1" style="flex:1;">Сохранить и уведомить</button>
+                    </div>
                 </form>
             </td>
         </tr>
@@ -4253,9 +4256,13 @@ app.post("/admin/tickets/:id/status", async (req, res) => {
 
         saveTickets();
 
-        // Пользователь получает уведомление в WhatsApp, если оставлен
-        // комментарий, либо если заявка только что переведена в "closed".
-        if (comment || (statusChanged && status === "closed")) {
+        // Кнопка "Сохранить" (notify=0) сохраняет статус/комментарий молча —
+        // без неё единственным способом что-то поправить без уведомления
+        // клиента было вообще не трогать статус и не писать комментарий.
+        // "Сохранить и уведомить" (notify=1) — прежнее поведение: уведомляем,
+        // если оставлен комментарий либо заявка только что закрыта.
+        const shouldNotify = req.body.notify === "1";
+        if (shouldNotify && (comment || (statusChanged && status === "closed"))) {
             await notifyUserAboutTicket(ticket, comment);
         }
     }
