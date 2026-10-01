@@ -1528,14 +1528,14 @@ async function restartWhatsAppClient() {
         console.error("Destroy error:", error.message);
     }
 
-    setTimeout(async () => {
-        try {
-            createWhatsAppClient();
-            await client.initialize();
-        } catch (error) {
-            restartingClient = false;
-            console.error("Reinitialize failed:", error.message);
-        }
+    // initializeWhatsAppClientWithRetry (определена ниже, но это ок — вызов
+    // произойдёт только позже, через setTimeout) сама уходит в бесконечный
+    // повтор при неудаче, поэтому здесь достаточно снять флаг и передать ей
+    // управление — раньше при провале переинициализации restartWhatsAppClient
+    // просто сдавался после одной попытки.
+    setTimeout(() => {
+        restartingClient = false;
+        initializeWhatsAppClientWithRetry();
     }, 3000);
 }
 function createWhatsAppClient() {
@@ -2472,8 +2472,31 @@ saveUsers();
 
 
 
-createWhatsAppClient();
-client.initialize();
+// Запуск клиента (и первый, и любой последующий через restartWhatsAppClient)
+// может упасть — например, если Chrome не смог запуститься (осиротевший
+// процесс всё ещё держит профиль .wwebjs_auth\session, временная нехватка
+// ресурсов и т.п.). Раньше такая ошибка на самом первом запуске просто
+// улетала в необработанный reject: процесс оставался жив (Express/админка
+// продолжали отвечать, поэтому /admin показывал "ожидает QR"), а
+// WhatsApp-клиент оставался мёртв насовсем, без единой попытки
+// восстановиться самому — требовался ручной перезапуск службы, который мог
+// не происходить днями. Теперь при неудаче автоматически пробуем снова
+// через WHATSAPP_INIT_RETRY_DELAY_MS, пока не получится — бот сам приходит
+// в себя после временного сбоя запуска Chrome.
+const WHATSAPP_INIT_RETRY_DELAY_MS = 30 * 1000;
+
+function initializeWhatsAppClientWithRetry() {
+    createWhatsAppClient();
+    client.initialize().catch(error => {
+        console.error(
+            `Ошибка запуска WhatsApp-клиента, повтор через ${WHATSAPP_INIT_RETRY_DELAY_MS / 1000} сек.:`,
+            error.message
+        );
+        setTimeout(initializeWhatsAppClientWithRetry, WHATSAPP_INIT_RETRY_DELAY_MS);
+    });
+}
+
+initializeWhatsAppClientWithRetry();
 
 // --------------------------------------------------
 // Фоновые задачи
